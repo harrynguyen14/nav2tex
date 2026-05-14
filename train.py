@@ -321,7 +321,7 @@ def train():
     use_bf16 = config.bf16 and device.type == "cuda"
     amp_ctx  = torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16)
     sdp_backends = (
-        [SDPBackend.FLASH_ATTENTION]
+        [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
         if config.flash_attn
         else [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
     )

@@ -48,17 +48,20 @@ class SqueezeAttention(nn.Module):
         q = _apply_rope(q, freqs)
         k = _apply_rope(k, freqs)
 
-        causal = torch.triu(torch.full((T, T), float("-inf"), device=x.device, dtype=q.dtype), diagonal=1)
-
-        if attention_mask is not None:
-            pad_mask  = (attention_mask == 0).unsqueeze(1).unsqueeze(2)
-            attn_bias = causal.unsqueeze(0).expand(B, 1, T, T).clone()
-            attn_bias = attn_bias.masked_fill(pad_mask, float("-inf"))
-        else:
-            attn_bias = causal
-
         drop = self.dropout_p if self.training else 0.0
-        out  = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, dropout_p=drop)
+
+        if attention_mask is None:
+            # no padding — use is_causal=True so flash attention can run
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=drop)
+        else:
+            # padding present — build additive mask, flash attn won't run but efficient will
+            pad_mask  = (attention_mask == 0).unsqueeze(1).unsqueeze(2)
+            attn_bias = torch.triu(
+                torch.full((T, T), float("-inf"), device=x.device, dtype=q.dtype), diagonal=1
+            ).unsqueeze(0).expand(B, 1, T, T).clone()
+            attn_bias = attn_bias.masked_fill(pad_mask, float("-inf"))
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, dropout_p=drop)
+
         return self.out_proj(out.transpose(1, 2).contiguous().view(B, T, C))
 
 
