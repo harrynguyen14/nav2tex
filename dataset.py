@@ -164,8 +164,9 @@ def collate_fn(batch: list[dict], pad_token_id: int = 1, patch_size: int = 16) -
     # image padding: find max H and W in batch, pad to multiple of patch_size
     imgs = [item["pixel_values"] for item in batch]
     if isinstance(imgs[0], torch.Tensor):
-        max_h = max(t.shape[1] for t in imgs)
-        max_w = max(t.shape[2] for t in imgs)
+        def _ceil_patch(x): return ((x + patch_size - 1) // patch_size) * patch_size
+        max_h = _ceil_patch(max(t.shape[1] for t in imgs))
+        max_w = _ceil_patch(max(t.shape[2] for t in imgs))
         padded_imgs = []
         encoder_key_masks = []
         for t in imgs:
