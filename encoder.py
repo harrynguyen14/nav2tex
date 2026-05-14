@@ -36,9 +36,18 @@ class NaFlexViTEncoder(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self.backbone.forward_features(x)
-        return self.proj(features)
+    def forward(self, x: torch.Tensor, max_patches: int | None = None) -> torch.Tensor:
+        features = self.backbone.forward_features(x)  # (B, S, C)
+        features = self.proj(features)
+        if max_patches is None:
+            return features
+        B, S, C = features.shape
+        if S > max_patches:
+            features = features[:, :max_patches, :]
+        elif S < max_patches:
+            pad = features.new_zeros(B, max_patches - S, C)
+            features = torch.cat([features, pad], dim=1)
+        return features
 
 
 def build_transform(model_name: str = MODEL_NAME, is_training: bool = False):
