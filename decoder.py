@@ -89,10 +89,10 @@ class CrossAttention(nn.Module):
 
         attn_mask = None
         if encoder_key_mask is not None:
-            # encoder_key_mask: (B, S) True=valid, False=padding
-            # sdpa expects additive mask: 0 for attend, -inf for ignore
+            # encoder_key_mask: (B, S') — truncate or pad to match actual encoder output length S
+            mask = encoder_key_mask[:, :S]
             attn_mask = torch.zeros(B, 1, 1, S, device=x.device, dtype=q.dtype)
-            attn_mask = attn_mask.masked_fill(~encoder_key_mask.unsqueeze(1).unsqueeze(2), float("-inf"))
+            attn_mask = attn_mask.masked_fill(~mask.unsqueeze(1).unsqueeze(2), float("-inf"))
 
         drop = self.dropout_p if self.training else 0.0
         out  = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop)
