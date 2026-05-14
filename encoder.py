@@ -43,7 +43,18 @@ class NaFlexViTEncoder(nn.Module):
 
 def build_transform(model_name: str = MODEL_NAME, is_training: bool = False):
     cfg = resolve_model_data_config(timm.create_model(model_name, pretrained=False))
-    return create_transform(**cfg, is_training=is_training)
+    mean, std = cfg["mean"], cfg["std"]
+    # No spatial resize — _patch_aware_resize in dataset controls image size.
+    # Only convert to tensor and normalize.
+    from torchvision import transforms
+    ops = []
+    if is_training:
+        ops += [transforms.ColorJitter(brightness=0.2, contrast=0.2)]
+    ops += [
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std),
+    ]
+    return transforms.Compose(ops)
 
 
 if __name__ == "__main__":
