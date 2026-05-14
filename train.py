@@ -74,6 +74,7 @@ def _make_optimizer_phase1(model: Nav2Tex, config) -> AdamW:
             {"params": no_decay, "weight_decay": 0.0},
         ],
         lr=config.phase1_lr,
+        fused=True,
     )
 
 
@@ -98,6 +99,7 @@ def _make_optimizer_phase2(model: Nav2Tex, config) -> AdamW:
             {"params": enc_nodecay,  "lr": config.phase2_enc_lr, "weight_decay": 0.0},
         ],
         lr=config.phase2_lr,
+        fused=True,
     )
 
 
@@ -314,9 +316,14 @@ def train():
     save_dir = Path(config.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    import os
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if config.cuda_benchmark and device.type == "cuda":
+    if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     use_bf16 = config.bf16 and device.type == "cuda"
     amp_ctx  = torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16)
