@@ -109,7 +109,7 @@ def _find_latest_checkpoint(save_dir: Path, phase: int) -> Path | None:
     return ckpts[-1] if ckpts else None
 
 
-def _save_checkpoint(model, optimizer, scheduler, config, phase: int, step: int, loss: float, save_dir: Path):
+def _save_checkpoint(model, optimizer, scheduler, config, phase: int, step: int, loss: float, save_dir: Path, keep_last: int = 2):
     ckpt_dir = save_dir / f"phase{phase}_step_{step:08d}"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -127,6 +127,12 @@ def _save_checkpoint(model, optimizer, scheduler, config, phase: int, step: int,
 
     with open(ckpt_dir / "config.json", "w") as f:
         json.dump(vars(config), f, indent=2)
+
+    # delete old checkpoints, keep only the last `keep_last`
+    old_ckpts = sorted(save_dir.glob(f"phase{phase}_step_*"), key=lambda p: int(p.name.split("_")[-1]))
+    for old in old_ckpts[:-keep_last]:
+        import shutil
+        shutil.rmtree(old)
 
 
 def _load_model_weights(model, ckpt_dir: Path):
@@ -252,8 +258,7 @@ def _run_phase(
             avg_gnorm   = running_gnorm    / n
             lr_now      = scheduler.get_last_lr()[0]
             pbar.set_postfix(
-                loss=f"{avg_loss:.4f}", lm=f"{avg_lm:.4f}", len=f"{avg_len:.4f}",
-                gnorm=f"{avg_gnorm:.3f}", lr=f"{lr_now:.2e}", tok_s=f"{tok_per_sec:,.0f}",
+                tok_s=f"{tok_per_sec:,.0f}",
             )
             tqdm.write(
                 f"[p{phase}] step={step:>7d}  loss={avg_loss:.4f}  lm={avg_lm:.4f}  len={avg_len:.4f}"
