@@ -2,6 +2,7 @@ import glob
 import io
 import random
 import re
+import struct
 from typing import Iterator
 
 import cv2
@@ -13,6 +14,27 @@ from PIL import Image
 from transformers import NougatTokenizerFast
 
 from normalize import normalize
+
+def _fast_image_size(data: bytes) -> tuple[int, int]:
+    """Parse image dimensions from PNG/JPEG header without full decode."""
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        w, h = struct.unpack('>II', data[16:24])
+        return w, h
+    if data[:2] == b'\xff\xd8':
+        i = 2
+        while i < len(data) - 8:
+            if data[i] != 0xff:
+                break
+            marker = data[i + 1]
+            if marker in (0xc0, 0xc1, 0xc2):
+                h, w = struct.unpack('>HH', data[i + 5:i + 9])
+                return w, h
+            seg_len = struct.unpack('>H', data[i + 2:i + 4])[0]
+            i += 2 + seg_len
+    # fallback to PIL for other formats (BMP, TIFF, etc.)
+    with Image.open(io.BytesIO(data)) as img:
+        return img.size
+
 
 _CPE_PATTERNS = re.compile(
     r'\\(frac|int|sum|prod|matrix|pmatrix|bmatrix|cases|align|begin|sqrt'
@@ -78,6 +100,23 @@ class Nav2TexDataset(Dataset):
 
         self.samples = rows
         self._scores = [_complexity_score(latex) for _, latex in rows]
+
+        # pre-compute approximate patch counts for bucket sampler
+        # parse PNG/JPEG header bytes directly — avoids full PIL decode (~10x faster)
+        ps = self.patch_size
+        mp = self.max_patches
+        patch_counts = []
+        for img_bytes, _ in rows:
+            w, h = _fast_image_size(img_bytes)
+            scale = (mp * ps * ps / max(w * h, 1)) ** 0.5
+            nw = max(ps, round(w * scale / ps) * ps)
+            nh = max(ps, round(h * scale / ps) * ps)
+            while (nw // ps) * (nh // ps) > mp:
+                if nw >= nh: nw -= ps
+                else:        nh -= ps
+                nw = max(ps, nw); nh = max(ps, nh)
+            patch_counts.append((nw // ps) * (nh // ps))
+        self._patch_counts = patch_counts
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -174,6 +213,44 @@ class CPEInterleaveSampler(Sampler):
             yield batch_idx
 
 
+class BucketBatchSampler(Sampler):
+    """Group samples by patch count into buckets to minimise padding waste."""
+
+    def __init__(self, dataset: Nav2TexDataset, batch_size: int,
+                 patch_size: int = 16, n_buckets: int = 16, seed: int = 42):
+        self.batch_size = batch_size
+        self.seed       = seed
+
+        # use pre-computed patch counts from dataset
+        patch_counts = dataset._patch_counts
+        sorted_idx = sorted(range(len(patch_counts)), key=lambda i: patch_counts[i])
+
+        # split into n_buckets buckets, build batch list
+        bucket_size = max(batch_size, len(sorted_idx) // n_buckets)
+        self._batches: list[list[int]] = []
+        for start in range(0, len(sorted_idx), bucket_size):
+            bucket = sorted_idx[start : start + bucket_size]
+            for b in range(0, len(bucket), batch_size):
+                batch = bucket[b : b + batch_size]
+                if len(batch) == batch_size:
+                    self._batches.append(batch)
+
+    def __len__(self) -> int:
+        return len(self._batches)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = random.Random(self.seed + getattr(self, "_epoch", 0))
+        order = list(range(len(self._batches)))
+        rng.shuffle(order)
+        for i in order:
+            batch = self._batches[i].copy()
+            rng.shuffle(batch)
+            yield batch
+
+
 def collate_fn(batch: list[dict], pad_token_id: int = 1, patch_size: int = 16) -> dict:
     max_text_len = max(item["input_ids"].size(0) for item in batch)
 
@@ -246,12 +323,21 @@ def build_dataloader(config, transform=None, split: str = "train") -> DataLoader
         patch_size=getattr(config, "patch_size", 16),
     )
 
-    if split == "train" and getattr(config, "cpe_ratio", 0) > 0:
-        sampler = CPEInterleaveSampler(
-            dataset,
-            batch_size=config.batch_size,
-            cpe_ratio=config.cpe_ratio,
-        )
+    patch_size = getattr(config, "patch_size", 16)
+
+    if split == "train":
+        if getattr(config, "cpe_ratio", 0) > 0:
+            sampler = CPEInterleaveSampler(
+                dataset,
+                batch_size=config.batch_size,
+                cpe_ratio=config.cpe_ratio,
+            )
+        else:
+            sampler = BucketBatchSampler(
+                dataset,
+                batch_size=config.batch_size,
+                patch_size=patch_size,
+            )
         return DataLoader(
             dataset,
             batch_sampler=sampler,
@@ -265,10 +351,10 @@ def build_dataloader(config, transform=None, split: str = "train") -> DataLoader
     return DataLoader(
         dataset,
         batch_size=config.batch_size,
-        shuffle=(split == "train"),
+        shuffle=False,
         num_workers=config.num_workers,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,
         collate_fn=_collate,
         persistent_workers=pw,
         prefetch_factor=pf,

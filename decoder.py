@@ -76,6 +76,23 @@ class DecoderLM(nn.Module):
         self.lam_lambda      = getattr(config, "lam_lambda", 1.0)
         self.vocab_size      = self.mbart.config.vocab_size
 
+    def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor, chunk: int = 512) -> torch.Tensor:
+        B, T, V = logits.shape
+        flat_labels = labels.view(-1)
+        total_loss  = logits.new_zeros(1)
+        n_valid     = (flat_labels != -100).sum().clamp(min=1)
+        for i in range(0, B * T, chunk):
+            chunk_logits = logits.view(-1, V)[i : i + chunk]
+            chunk_labels = flat_labels[i : i + chunk]
+            loss = F.cross_entropy(
+                chunk_logits, chunk_labels,
+                ignore_index=-100,
+                label_smoothing=self.label_smoothing,
+                reduction="sum",
+            )
+            total_loss = total_loss + loss
+        return total_loss / n_valid
+
     def _enc_attn_mask(self, encoder_key_mask, S, device):
         if encoder_key_mask is None:
             return None
@@ -105,12 +122,7 @@ class DecoderLM(nn.Module):
         if labels is None:
             return logits
 
-        lm_loss = F.cross_entropy(
-            logits.view(-1, self.vocab_size),
-            labels.view(-1),
-            ignore_index=-100,
-            label_smoothing=self.label_smoothing,
-        )
+        lm_loss = self._chunked_cross_entropy(logits, labels)
         len_loss = (
             F.smooth_l1_loss(pred_len, true_len)
             if true_len is not None
