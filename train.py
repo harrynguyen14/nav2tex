@@ -58,8 +58,16 @@ def _make_scheduler(optimizer: AdamW, warmup_steps: int, total_steps: int) -> La
     return LambdaLR(optimizer, lr_lambda)
 
 
+def _get_adamw_cls(config):
+    if getattr(config, "optim_8bit", False):
+        import bitsandbytes as bnb
+        return bnb.optim.AdamW8bit
+    return AdamW
+
+
 def _make_optimizer_phase1(model: Nav2Tex, config) -> AdamW:
     """Phase 1: encoder frozen, only decoder params."""
+    adamw_cls = _get_adamw_cls(config)
     decay, no_decay = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -68,18 +76,21 @@ def _make_optimizer_phase1(model: Nav2Tex, config) -> AdamW:
             no_decay.append(param)
         else:
             decay.append(param)
-    return AdamW(
+    kwargs = {"lr": config.phase1_lr}
+    if adamw_cls is AdamW:
+        kwargs["fused"] = True
+    return adamw_cls(
         [
             {"params": decay,    "weight_decay": config.weight_decay},
             {"params": no_decay, "weight_decay": 0.0},
         ],
-        lr=config.phase1_lr,
-        fused=True,
+        **kwargs,
     )
 
 
 def _make_optimizer_phase2(model: Nav2Tex, config) -> AdamW:
     """Phase 2: differential LR — encoder gets 10x lower LR than decoder."""
+    adamw_cls = _get_adamw_cls(config)
     enc_decay, enc_nodecay = [], []
     dec_decay, dec_nodecay = [], []
     for name, param in model.named_parameters():
@@ -91,15 +102,17 @@ def _make_optimizer_phase2(model: Nav2Tex, config) -> AdamW:
             (enc_nodecay if is_nodecay else enc_decay).append(param)
         else:
             (dec_nodecay if is_nodecay else dec_decay).append(param)
-    return AdamW(
+    kwargs = {"lr": config.phase2_lr}
+    if adamw_cls is AdamW:
+        kwargs["fused"] = True
+    return adamw_cls(
         [
             {"params": dec_decay,    "lr": config.phase2_lr,     "weight_decay": config.weight_decay},
             {"params": dec_nodecay,  "lr": config.phase2_lr,     "weight_decay": 0.0},
             {"params": enc_decay,    "lr": config.phase2_enc_lr, "weight_decay": config.weight_decay},
             {"params": enc_nodecay,  "lr": config.phase2_enc_lr, "weight_decay": 0.0},
         ],
-        lr=config.phase2_lr,
-        fused=True,
+        **kwargs,
     )
 
 
