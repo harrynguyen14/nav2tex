@@ -420,7 +420,7 @@ def train():
 
     val_loader = None
     if getattr(config, "val_data_glob", None):
-        val_dict = {**vars(config), "data_glob": config.val_data_glob, "batch_size": config.val_batch_size}
+        val_dict = {**vars(config), "data_glob": config.val_data_glob, "data_glob_ratios": None, "batch_size": config.val_batch_size}
         val_cfg  = argparse.Namespace(**val_dict)
         val_loader = build_dataloader(val_cfg, transform=val_transform, split="val")
 
