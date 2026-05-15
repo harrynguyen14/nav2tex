@@ -48,13 +48,24 @@ class DecoderLM(nn.Module):
         super().__init__()
         self.config = config
 
-        attn_impl = "flash_attention_2" if getattr(config, "flash_attn", False) else "eager"
+        dtype = torch.bfloat16 if getattr(config, "bf16", True) else torch.float32
         ved = VisionEncoderDecoderModel.from_pretrained(
             self.PRETRAINED,
-            attn_implementation=attn_impl,
-            dtype=torch.bfloat16 if getattr(config, "bf16", True) else torch.float32,
+            attn_implementation="eager",
+            dtype=dtype,
         )
-        self.mbart = ved.decoder
+        # DonutSwinModel encoder does not support flash_attention_2 —
+        # extract decoder weights and reload with flash attn impl
+        if getattr(config, "flash_attn", False):
+            from transformers import MBartForCausalLM
+            mbart = MBartForCausalLM._from_config(
+                ved.decoder.config,
+                attn_implementation="flash_attention_2",
+            ).to(dtype=dtype)
+            mbart.load_state_dict(ved.decoder.state_dict())
+            self.mbart = mbart
+        else:
+            self.mbart = ved.decoder
 
         self.enc_proj = nn.Linear(self.ENCODER_DIM, self.DECODER_DIM, bias=False)
         self.enc_norm = nn.LayerNorm(self.DECODER_DIM)
