@@ -76,16 +76,21 @@ class DecoderLM(nn.Module):
         self.lam_lambda      = getattr(config, "lam_lambda", 1.0)
         self.vocab_size      = self.mbart.config.vocab_size
 
-    def _chunked_cross_entropy(self, logits: torch.Tensor, labels: torch.Tensor, chunk: int = 512) -> torch.Tensor:
-        B, T, V = logits.shape
-        flat_labels = labels.view(-1)
-        total_loss  = logits.new_zeros(1)
+    def _chunked_cross_entropy(self, hidden: torch.Tensor, labels: torch.Tensor, chunk: int = 256) -> torch.Tensor:
+        # Project chunk-by-chunk: max live tensor is (chunk, V) not (B*T, V).
+        # Gradient flows through hidden -> each chunk_logits normally.
+        lm_head = self.mbart.lm_head
+        B, T, D = hidden.shape
+        flat_h      = hidden.reshape(B * T, D)
+        flat_labels = labels.reshape(B * T)
         n_valid     = (flat_labels != -100).sum().clamp(min=1)
+        total_loss  = hidden.new_zeros(1)
         for i in range(0, B * T, chunk):
-            chunk_logits = logits.view(-1, V)[i : i + chunk]
-            chunk_labels = flat_labels[i : i + chunk]
+            chunk_h      = flat_h[i : i + chunk]
+            chunk_lbl    = flat_labels[i : i + chunk]
+            chunk_logits = lm_head(chunk_h)
             loss = F.cross_entropy(
-                chunk_logits, chunk_labels,
+                chunk_logits, chunk_lbl,
                 ignore_index=-100,
                 label_smoothing=self.label_smoothing,
                 reduction="sum",
@@ -110,6 +115,15 @@ class DecoderLM(nn.Module):
 
         enc_attn_mask = self._enc_attn_mask(encoder_key_mask, enc.size(1), enc.device)
 
+        # Capture post-layernorm hidden state via hook on the decoder module itself.
+        # This gets the final normalized hidden state (after layer_norm, before lm_head)
+        # without materialising the full (B*T, V) logits tensor.
+        _last_hidden: list[torch.Tensor] = []
+        if labels is not None:
+            hook = self.mbart.model.decoder.register_forward_hook(
+                lambda _m, _inp, out: _last_hidden.append(out[0])
+            )
+
         out = self.mbart(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -117,12 +131,15 @@ class DecoderLM(nn.Module):
             encoder_attention_mask=enc_attn_mask,
             use_cache=False,
         )
-        logits = out.logits
 
         if labels is None:
-            return logits
+            return out.logits
 
-        lm_loss = self._chunked_cross_entropy(logits, labels)
+        hook.remove()
+        last_hidden = _last_hidden[0]
+        del out  # free logits immediately
+
+        lm_loss = self._chunked_cross_entropy(last_hidden, labels)
         len_loss = (
             F.smooth_l1_loss(pred_len, true_len)
             if true_len is not None
