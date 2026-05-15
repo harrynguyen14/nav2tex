@@ -13,15 +13,14 @@ class Nav2Tex(nn.Module):
         super().__init__()
         model_name = getattr(config, "encoder_model", "naflexvit_base_patch16_gap.e300_s576_in1k")
         self.max_patches  = getattr(config, "max_patches", 576)
-        self.grad_ckpt    = getattr(config, "grad_ckpt", False)
         self.encoder = NaFlexViTEncoder(model_name=model_name, pretrained=True, freeze_backbone=freeze_encoder)
         self.decoder = DecoderLM(config)
 
+        if getattr(config, "grad_ckpt", False):
+            self.encoder.enable_grad_checkpointing()
+
     def forward(self, images, input_ids, attention_mask=None, labels=None, true_len=None, encoder_key_mask=None):
-        if self.grad_ckpt and self.training:
-            encoder_output = checkpoint(self.encoder, images, self.max_patches, use_reentrant=False)
-        else:
-            encoder_output = self.encoder(images, max_patches=self.max_patches)
+        encoder_output = self.encoder(images, max_patches=self.max_patches)
         return self.decoder(
             input_ids,
             attention_mask=attention_mask,

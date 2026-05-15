@@ -36,6 +36,11 @@ class NaFlexViTEncoder(nn.Module):
             else nn.Identity()
         )
 
+    def enable_grad_checkpointing(self):
+        # timm models expose set_grad_checkpointing for per-block checkpointing
+        if hasattr(self.backbone, "set_grad_checkpointing"):
+            self.backbone.set_grad_checkpointing(enable=True)
+
     def forward(self, x: torch.Tensor, max_patches: int | None = None) -> torch.Tensor:
         features = self.backbone.forward_features(x)  # (B, S, C)
         features = self.proj(features)
