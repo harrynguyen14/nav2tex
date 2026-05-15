@@ -77,6 +77,8 @@ def get_config():
     p.add_argument("--early-stopping-patience",   type=int, default=5,
                    help="stop phase if val PPL does not improve for this many val checks")
     p.add_argument("--resume",                    default=None, help="path to checkpoint dir to resume from")
+    p.add_argument("--skip-phase1",               action="store_true", default=False,
+                   help="skip phase1 training; load weights from --resume and go straight to phase2")
 
     # hardware
     p.add_argument("--num-workers",        type=int,            default=4)

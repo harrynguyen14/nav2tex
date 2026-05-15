@@ -343,7 +343,7 @@ def _run_phase(
                     break
 
         if val_loader is not None and tokenizer is not None and step % bleu_every == 0:
-            _run_evaluation(model, val_loader, tokenizer, config, device, phase)
+            _run_evaluation(model, val_loader, tokenizer, config, device, phase, amp_ctx=amp_ctx)
 
     pbar.close()
     _save_checkpoint(model, optimizer, scheduler, config, phase, step, accum_loss, save_dir)
@@ -351,10 +351,11 @@ def _run_phase(
 
 
 @torch.no_grad()
-def _run_evaluation(model: Nav2Tex, loader, tokenizer, config, device, phase: int):
+def _run_evaluation(model: Nav2Tex, loader, tokenizer, config, device, phase: int, amp_ctx=None):
     model.train(False)
     hypotheses, references = [], []
     max_samples = getattr(config, "bleu_samples", 512)
+    _amp = amp_ctx if amp_ctx is not None else contextlib.nullcontext()
 
     for batch in tqdm(loader, desc=f"bleu p{phase}", dynamic_ncols=True, leave=False):
         if len(hypotheses) >= max_samples:
@@ -363,14 +364,15 @@ def _run_evaluation(model: Nav2Tex, loader, tokenizer, config, device, phase: in
         encoder_key_mask = batch["encoder_key_mask"].to(device) if batch["encoder_key_mask"] is not None else None
         ref_ids          = batch["labels"]
 
-        pred_ids = model.generate(
-            pixel_values,
-            tokenizer,
-            max_new_tokens=config.max_seq_len,
-            device=device,
-            encoder_key_mask=encoder_key_mask,
-            num_beams=getattr(config, "num_beams", 1),
-        )
+        with _amp:
+            pred_ids = model.generate(
+                pixel_values,
+                tokenizer,
+                max_new_tokens=config.max_seq_len,
+                device=device,
+                encoder_key_mask=encoder_key_mask,
+                num_beams=getattr(config, "num_beams", 1),
+            )
 
         for pred, ref in zip(pred_ids, ref_ids):
             pred_text = tokenizer.decode(pred.tolist(), skip_special_tokens=True)
@@ -428,48 +430,55 @@ def train():
     tokenizer = NougatTokenizerFast.from_pretrained(config.tokenizer_dir)
 
     # ── Phase 1: frozen encoder ──────────────────────────────────────────────
-    print("\n=== Phase 1: frozen encoder ===")
-    loader1   = build_dataloader(config, transform=transform, split="train")
-
-    stats = loader1.dataset.score_stats()
-    print(f"dataset: total={stats['total']}  cpe={stats['n_cpe']} ({stats['cpe_pct']}%)")
-
     model = Nav2Tex(config, freeze_encoder=True).to(device)
-    print(f"parameters (trainable): {model.num_parameters() / 1e6:.1f}M")
 
-    steps_per_epoch1 = max(1, len(loader1) // config.grad_accum)
-    total_steps1     = steps_per_epoch1 * config.phase1_epochs
-    print(f"phase1: steps_per_epoch={steps_per_epoch1}  total={total_steps1}")
-
-    opt1  = _make_optimizer_phase1(model, config)
-    sch1  = _make_scheduler(opt1, config.warmup_steps, total_steps1)
-
-    start_step1 = 0
-    resume_ckpt = Path(config.resume) if config.resume else _find_latest_checkpoint(save_dir, phase=1)
-    if resume_ckpt and resume_ckpt.exists():
-        if "phase2" in resume_ckpt.name:
-            print(f"WARNING: --resume points to a phase2 checkpoint ({resume_ckpt.name}); skipping phase1 resume")
-        else:
-            print(f"resuming phase1 from {resume_ckpt}")
+    if getattr(config, "skip_phase1", False):
+        resume_ckpt = Path(config.resume) if config.resume else _find_latest_checkpoint(save_dir, phase=1)
+        if resume_ckpt and resume_ckpt.exists():
+            print(f"\n=== Phase 1: skipped (loading weights from {resume_ckpt}) ===")
             _load_model_weights(model, resume_ckpt)
-            start_step1 = _load_trainer_state(opt1, sch1, resume_ckpt, device)
-            print(f"resumed at step {start_step1}")
+        else:
+            print("\n=== Phase 1: skipped (no checkpoint found, using pretrained weights) ===")
+    else:
+        print("\n=== Phase 1: frozen encoder ===")
+        loader1   = build_dataloader(config, transform=transform, split="train")
 
-    if config.compile:
-        model = torch.compile(model)
+        stats = loader1.dataset.score_stats()
+        print(f"dataset: total={stats['total']}  cpe={stats['n_cpe']} ({stats['cpe_pct']}%)")
 
-    _run_phase(model, loader1, opt1, sch1, config, phase=1,
-               total_steps=total_steps1, start_step=start_step1,
-               device=device, save_dir=save_dir, amp_ctx=amp_ctx, sdp_backends=sdp_backends,
-               val_loader=val_loader, tokenizer=tokenizer)
+        print(f"parameters (trainable): {model.num_parameters() / 1e6:.1f}M")
 
-    _save_final_model(model, config, save_dir, phase=1)
+        steps_per_epoch1 = max(1, len(loader1) // config.grad_accum)
+        total_steps1     = steps_per_epoch1 * config.phase1_epochs
+        print(f"phase1: steps_per_epoch={steps_per_epoch1}  total={total_steps1}")
+
+        opt1  = _make_optimizer_phase1(model, config)
+        sch1  = _make_scheduler(opt1, config.warmup_steps, total_steps1)
+
+        start_step1 = 0
+        resume_ckpt = Path(config.resume) if config.resume else _find_latest_checkpoint(save_dir, phase=1)
+        if resume_ckpt and resume_ckpt.exists():
+            if "phase2" in resume_ckpt.name:
+                print(f"WARNING: --resume points to a phase2 checkpoint ({resume_ckpt.name}); skipping phase1 resume")
+            else:
+                print(f"resuming phase1 from {resume_ckpt}")
+                _load_model_weights(model, resume_ckpt)
+                start_step1 = _load_trainer_state(opt1, sch1, resume_ckpt, device)
+                print(f"resumed at step {start_step1}")
+
+        if config.compile:
+            model = torch.compile(model)
+
+        _run_phase(model, loader1, opt1, sch1, config, phase=1,
+                   total_steps=total_steps1, start_step=start_step1,
+                   device=device, save_dir=save_dir, amp_ctx=amp_ctx, sdp_backends=sdp_backends,
+                   val_loader=val_loader, tokenizer=tokenizer)
+
+        _save_final_model(model, config, save_dir, phase=1)
+        del loader1, opt1, sch1
 
     # ── Phase 2: full model ──────────────────────────────────────────────────
     print("\n=== Phase 2: full model (differential LR) ===")
-
-    # free phase1 dataset + optimizer state before unfreeze to avoid OOM
-    del loader1, opt1, sch1
     torch.cuda.empty_cache()
 
     p2_dict   = {
