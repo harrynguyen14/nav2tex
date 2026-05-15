@@ -65,10 +65,18 @@ def get_config():
     p.add_argument("--label-smoothing",     type=float, default=0.1)
 
     # checkpoint
-    p.add_argument("--save-dir",            default=_DEFAULT_SAVE_DIR)
-    p.add_argument("--save-every-n-steps",  type=int, default=2000)
-    p.add_argument("--log-every-n-steps",   type=int, default=100)
-    p.add_argument("--resume",              default=None, help="path to checkpoint dir to resume from")
+    p.add_argument("--save-dir",                  default=_DEFAULT_SAVE_DIR)
+    p.add_argument("--save-every-n-steps",        type=int, default=2000)
+    p.add_argument("--log-every-n-steps",         type=int, default=100)
+    p.add_argument("--val-every-n-steps",         type=int, default=2500,
+                   help="run val PPL every N steps (requires --val-data-glob)")
+    p.add_argument("--bleu-every-n-steps",        type=int, default=10000,
+                   help="run BLEU/exact-match eval every N steps (requires --val-data-glob)")
+    p.add_argument("--bleu-samples",              type=int, default=512,
+                   help="number of samples for BLEU eval")
+    p.add_argument("--early-stopping-patience",   type=int, default=5,
+                   help="stop phase if val PPL does not improve for this many val checks")
+    p.add_argument("--resume",                    default=None, help="path to checkpoint dir to resume from")
 
     # hardware
     p.add_argument("--num-workers",        type=int,            default=4)

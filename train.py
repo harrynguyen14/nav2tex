@@ -109,8 +109,10 @@ def _find_latest_checkpoint(save_dir: Path, phase: int) -> Path | None:
     return ckpts[-1] if ckpts else None
 
 
-def _save_checkpoint(model, optimizer, scheduler, config, phase: int, step: int, loss: float, save_dir: Path, keep_last: int = 2):
-    ckpt_dir = save_dir / f"phase{phase}_step_{step:08d}"
+def _save_checkpoint(model, optimizer, scheduler, config, phase: int, step: int, loss: float,
+                     save_dir: Path, keep_last: int = 2, tag: str | None = None):
+    name     = f"phase{phase}_best" if tag == "best" else f"phase{phase}_step_{step:08d}"
+    ckpt_dir = save_dir / name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
@@ -128,11 +130,12 @@ def _save_checkpoint(model, optimizer, scheduler, config, phase: int, step: int,
     with open(ckpt_dir / "config.json", "w") as f:
         json.dump(vars(config), f, indent=2)
 
-    # delete old checkpoints, keep only the last `keep_last`
-    old_ckpts = sorted(save_dir.glob(f"phase{phase}_step_*"), key=lambda p: int(p.name.split("_")[-1]))
-    for old in old_ckpts[:-keep_last]:
+    # delete old step checkpoints (best checkpoint is never rotated)
+    if tag != "best":
         import shutil
-        shutil.rmtree(old)
+        old_ckpts = sorted(save_dir.glob(f"phase{phase}_step_*"), key=lambda p: int(p.name.split("_")[-1]))
+        for old in old_ckpts[:-keep_last]:
+            shutil.rmtree(old)
 
 
 def _save_final_model(model, config, save_dir: Path, phase: int):
@@ -173,6 +176,36 @@ def _load_trainer_state(optimizer, scheduler, ckpt_dir: Path, device) -> int:
     return int(trainer_scalars["step"])
 
 
+def _val_ppl(model: Nav2Tex, loader, device, amp_ctx, config) -> float:
+    """Compute validation PPL over up to val_samples batches."""
+    model.train(False)
+    total_loss, total_tokens = 0.0, 0
+    max_samples = getattr(config, "val_samples", 500)
+    seen = 0
+    with torch.no_grad():
+        for batch in loader:
+            if seen >= max_samples:
+                break
+            pixel_values     = batch["pixel_values"].to(device, non_blocking=True)
+            encoder_key_mask = batch["encoder_key_mask"].to(device, non_blocking=True) if batch["encoder_key_mask"] is not None else None
+            input_ids        = batch["input_ids"].to(device, non_blocking=True)
+            labels           = batch["labels"].to(device, non_blocking=True)
+            attention_mask   = batch["attention_mask"].to(device, non_blocking=True)
+            true_len         = batch["true_len"].to(device, non_blocking=True)
+            with amp_ctx:
+                _, lm_loss, _ = model(
+                    pixel_values, input_ids,
+                    attention_mask=attention_mask, labels=labels,
+                    true_len=true_len, encoder_key_mask=encoder_key_mask,
+                )
+            n_tok = (labels != -100).sum().item()
+            total_loss   += lm_loss.item() * n_tok
+            total_tokens += n_tok
+            seen += input_ids.size(0)
+    model.train(True)
+    return math.exp(total_loss / max(total_tokens, 1))
+
+
 def _run_phase(
     model: Nav2Tex,
     loader,
@@ -186,6 +219,8 @@ def _run_phase(
     save_dir: Path,
     amp_ctx,
     sdp_backends,
+    val_loader=None,
+    tokenizer=None,
 ):
     model.train()
     step             = start_step
@@ -197,6 +232,12 @@ def _run_phase(
     running_gnorm    = 0.0
     tokens_seen      = 0
     t0               = time.perf_counter()
+
+    val_every   = getattr(config, "val_every_n_steps", 2500)
+    bleu_every  = getattr(config, "bleu_every_n_steps", 10000)
+    patience    = getattr(config, "early_stopping_patience", 5)
+    best_val_ppl  = float("inf")
+    no_improve    = 0
 
     pbar = tqdm(total=total_steps, initial=start_step, desc=f"phase{phase}", dynamic_ncols=True)
 
@@ -270,13 +311,13 @@ def _run_phase(
             avg_lm      = running_lm_loss  / n
             avg_len     = running_len_loss / n
             avg_gnorm   = running_gnorm    / n
+            avg_ppl     = math.exp(min(avg_lm, 20))
             lr_now      = scheduler.get_last_lr()[0]
-            pbar.set_postfix(
-                tok_s=f"{tok_per_sec:,.0f}",
-            )
+            pbar.set_postfix(tok_s=f"{tok_per_sec:,.0f}")
             tqdm.write(
-                f"[p{phase}] step={step:>7d}  loss={avg_loss:.4f}  lm={avg_lm:.4f}  len={avg_len:.4f}"
-                f"  gnorm={avg_gnorm:.3f}  lr={lr_now:.2e}  tok/s={tok_per_sec:,.0f}"
+                f"[p{phase}] step={step:>7d}  loss={avg_loss:.4f}  lm={avg_lm:.4f}  "
+                f"ppl={avg_ppl:.2f}  len={avg_len:.4f}  gnorm={avg_gnorm:.3f}  "
+                f"lr={lr_now:.2e}  tok/s={tok_per_sec:,.0f}"
             )
             running_loss = running_lm_loss = running_len_loss = running_gnorm = tokens_seen = 0
             t0 = time.perf_counter()
@@ -284,6 +325,25 @@ def _run_phase(
         if step % config.save_every_n_steps == 0:
             _save_checkpoint(model, optimizer, scheduler, config, phase, step, accum_loss, save_dir)
             tqdm.write(f"  [p{phase}] checkpoint saved at step {step}")
+
+        if val_loader is not None and step % val_every == 0:
+            val_ppl = _val_ppl(model, val_loader, device, amp_ctx, config)
+            tqdm.write(f"  [p{phase}] step={step}  val_ppl={val_ppl:.2f}  best={best_val_ppl:.2f}")
+            if val_ppl < best_val_ppl:
+                best_val_ppl = val_ppl
+                no_improve   = 0
+                _save_checkpoint(model, optimizer, scheduler, config, phase, step, accum_loss,
+                                 save_dir, keep_last=2, tag="best")
+                tqdm.write(f"  [p{phase}] new best val_ppl={val_ppl:.2f} → saved best checkpoint")
+            else:
+                no_improve += 1
+                tqdm.write(f"  [p{phase}] no improvement {no_improve}/{patience}")
+                if no_improve >= patience:
+                    tqdm.write(f"  [p{phase}] early stopping at step {step}")
+                    break
+
+        if val_loader is not None and tokenizer is not None and step % bleu_every == 0:
+            _run_evaluation(model, val_loader, tokenizer, config, device, phase)
 
     pbar.close()
     _save_checkpoint(model, optimizer, scheduler, config, phase, step, accum_loss, save_dir)
@@ -294,9 +354,9 @@ def _run_phase(
 def _run_evaluation(model: Nav2Tex, loader, tokenizer, config, device, phase: int):
     model.train(False)
     hypotheses, references = [], []
-    max_samples = getattr(config, "val_samples", 500)
+    max_samples = getattr(config, "bleu_samples", 512)
 
-    for batch in tqdm(loader, desc=f"validation p{phase}", dynamic_ncols=True, leave=False):
+    for batch in tqdm(loader, desc=f"bleu p{phase}", dynamic_ncols=True, leave=False):
         if len(hypotheses) >= max_samples:
             break
         pixel_values     = batch["pixel_values"].to(device)
@@ -400,10 +460,8 @@ def train():
 
     _run_phase(model, loader1, opt1, sch1, config, phase=1,
                total_steps=total_steps1, start_step=start_step1,
-               device=device, save_dir=save_dir, amp_ctx=amp_ctx, sdp_backends=sdp_backends)
-
-    if val_loader is not None:
-        _run_evaluation(model, val_loader, tokenizer, config, device, phase=1)
+               device=device, save_dir=save_dir, amp_ctx=amp_ctx, sdp_backends=sdp_backends,
+               val_loader=val_loader, tokenizer=tokenizer)
 
     _save_final_model(model, config, save_dir, phase=1)
 
@@ -451,10 +509,8 @@ def train():
 
     _run_phase(model, loader2, opt2, sch2, p2_config, phase=2,
                total_steps=total_steps2, start_step=start_step2,
-               device=device, save_dir=save_dir, amp_ctx=amp_ctx, sdp_backends=sdp_backends)
-
-    if val_loader is not None:
-        _run_evaluation(model, val_loader, tokenizer, config, device, phase=2)
+               device=device, save_dir=save_dir, amp_ctx=amp_ctx, sdp_backends=sdp_backends,
+               val_loader=val_loader, tokenizer=tokenizer)
 
     _save_final_model(model, config, save_dir, phase=2)
     print("training complete")
