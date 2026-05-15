@@ -88,6 +88,8 @@ def get_config():
     p.add_argument("--no-bf16",            action="store_false", dest="bf16")
     p.add_argument("--compile",            action="store_true", default=False)
     p.add_argument("--flash-attn",         action="store_true", default=False)
+    p.add_argument("--grad-ckpt",          action="store_true", default=False,
+                   help="enable gradient checkpointing on encoder and decoder to reduce VRAM")
     p.add_argument("--num-beams",          type=int,            default=1,
                    help="beam width for validation decoding (1 = greedy)")
 

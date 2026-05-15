@@ -76,6 +76,11 @@ class DecoderLM(nn.Module):
         self.lam_lambda      = getattr(config, "lam_lambda", 1.0)
         self.vocab_size      = self.mbart.config.vocab_size
 
+        if getattr(config, "grad_ckpt", False):
+            self.mbart.model.decoder.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+
     def _chunked_cross_entropy(self, hidden: torch.Tensor, labels: torch.Tensor, chunk: int = 1024) -> torch.Tensor:
         # Project chunk-by-chunk: max live tensor is (chunk, V) not (B*T, V).
         # Gradient flows through hidden -> each chunk_logits normally.

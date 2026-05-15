@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from encoder import NaFlexViTEncoder
 from decoder import DecoderLM
@@ -11,12 +12,16 @@ class Nav2Tex(nn.Module):
     def __init__(self, config, freeze_encoder: bool = False):
         super().__init__()
         model_name = getattr(config, "encoder_model", "naflexvit_base_patch16_gap.e300_s576_in1k")
-        self.max_patches = getattr(config, "max_patches", 576)
+        self.max_patches  = getattr(config, "max_patches", 576)
+        self.grad_ckpt    = getattr(config, "grad_ckpt", False)
         self.encoder = NaFlexViTEncoder(model_name=model_name, pretrained=True, freeze_backbone=freeze_encoder)
         self.decoder = DecoderLM(config)
 
     def forward(self, images, input_ids, attention_mask=None, labels=None, true_len=None, encoder_key_mask=None):
-        encoder_output = self.encoder(images, max_patches=self.max_patches)
+        if self.grad_ckpt and self.training:
+            encoder_output = checkpoint(self.encoder, images, self.max_patches, use_reentrant=False)
+        else:
+            encoder_output = self.encoder(images, max_patches=self.max_patches)
         return self.decoder(
             input_ids,
             attention_mask=attention_mask,
