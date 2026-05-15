@@ -53,7 +53,11 @@ def get_config():
 
     # training - shared
     p.add_argument("--batch-size",          type=int,   default=16)
+    p.add_argument("--phase2-batch-size",   type=int,   default=None,
+                   help="batch size for phase2; falls back to --batch-size if not set")
     p.add_argument("--grad-accum",          type=int,   default=8)
+    p.add_argument("--phase2-grad-accum",   type=int,   default=None,
+                   help="grad accum for phase2; falls back to --grad-accum if not set")
     p.add_argument("--warmup-steps",        type=int,   default=200)
     p.add_argument("--phase2-warmup-steps", type=int,   default=200)
     p.add_argument("--weight-decay",        type=float, default=0.01)

@@ -4,6 +4,8 @@ import random
 import re
 from typing import Iterator
 
+import cv2
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 import pyarrow.parquet as pq
@@ -35,7 +37,9 @@ def _patch_aware_resize(img: Image.Image, max_patches: int, patch_size: int = 16
             new_h -= patch_size
         new_w = max(patch_size, new_w)
         new_h = max(patch_size, new_h)
-    return img.resize((new_w, new_h), Image.BICUBIC)
+    arr = np.array(img)
+    arr = cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+    return Image.fromarray(arr)
 
 
 class Nav2TexDataset(Dataset):

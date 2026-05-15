@@ -409,10 +409,17 @@ def train():
 
     # ── Phase 2: full model ──────────────────────────────────────────────────
     print("\n=== Phase 2: full model (differential LR) ===")
+
+    # free phase1 dataset + optimizer state before unfreeze to avoid OOM
+    del loader1, opt1, sch1
+    torch.cuda.empty_cache()
+
     p2_dict   = {
         **vars(config),
         "data_glob":        config.phase2_data_glob,
         "data_glob_ratios": getattr(config, "phase2_data_glob_ratios", None),
+        "batch_size":       config.phase2_batch_size or config.batch_size,
+        "grad_accum":       config.phase2_grad_accum or config.grad_accum,
     }
     p2_config = argparse.Namespace(**p2_dict)
     loader2   = build_dataloader(p2_config, transform=transform, split="train")
@@ -425,9 +432,10 @@ def train():
         p.requires_grad_(True)
     print(f"parameters (trainable after unfreeze): {model.num_parameters() / 1e6:.1f}M")
 
-    steps_per_epoch2 = max(1, len(loader2) // config.grad_accum)
+    steps_per_epoch2 = max(1, len(loader2) // p2_config.grad_accum)
     total_steps2     = steps_per_epoch2 * config.phase2_epochs
-    print(f"phase2: steps_per_epoch={steps_per_epoch2}  total={total_steps2}")
+    print(f"phase2: steps_per_epoch={steps_per_epoch2}  total={total_steps2}"
+          f"  bs={p2_config.batch_size}  grad_accum={p2_config.grad_accum}")
 
     opt2  = _make_optimizer_phase2(model, config)
     warmup2 = min(getattr(config, "phase2_warmup_steps", 200), max(1, total_steps2 // 10))
@@ -441,7 +449,7 @@ def train():
         start_step2 = _load_trainer_state(opt2, sch2, resume_ckpt2, device)
         print(f"resumed at step {start_step2}")
 
-    _run_phase(model, loader2, opt2, sch2, config, phase=2,
+    _run_phase(model, loader2, opt2, sch2, p2_config, phase=2,
                total_steps=total_steps2, start_step=start_step2,
                device=device, save_dir=save_dir, amp_ctx=amp_ctx, sdp_backends=sdp_backends)
 
