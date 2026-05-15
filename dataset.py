@@ -1,9 +1,12 @@
 import glob
 import io
+import json
 import random
 import re
+from pathlib import Path
 from typing import Iterator
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 import pyarrow.parquet as pq
@@ -94,6 +97,91 @@ class Nav2TexDataset(Dataset):
             "input_ids":    torch.tensor(input_ids, dtype=torch.long),
             "labels":       torch.tensor(labels,    dtype=torch.long),
             "true_len":     torch.tensor(len(ids) / self.config.max_seq_len, dtype=torch.float),
+        }
+
+    def normal_indices(self) -> list[int]:
+        t = self.config.cpe_score_threshold
+        return [i for i, sc in enumerate(self._scores) if sc <= t]
+
+    def cpe_indices(self) -> list[int]:
+        t = self.config.cpe_score_threshold
+        return [i for i, sc in enumerate(self._scores) if sc > t]
+
+    def score_stats(self) -> dict:
+        import statistics
+        scores = self._scores
+        thresh = self.config.cpe_score_threshold
+        n_cpe  = sum(1 for sc in scores if sc > thresh)
+        return {
+            "total":   len(scores),
+            "n_cpe":   n_cpe,
+            "n_spe":   len(scores) - n_cpe,
+            "cpe_pct": round(n_cpe / len(scores) * 100, 2),
+            "median":  round(statistics.median(scores), 1),
+            "p95":     round(sorted(scores)[int(len(scores) * 0.95)], 1),
+        }
+
+
+class Nav2TexDecodedDataset(Dataset):
+    """Fast dataset reading pre-decoded shards from predecode.py."""
+
+    def __init__(self, config, transform=None):
+        self.config    = config
+        self.transform = transform
+
+        globs = config.data_glob if isinstance(config.data_glob, list) else [config.data_glob]
+        shard_dirs = sorted(p for pattern in globs for p in glob.glob(pattern))
+        if not shard_dirs:
+            raise FileNotFoundError(f"No decoded shards found: {config.data_glob}")
+
+        self._img_paths: list[Path] = []
+        self._input_ids: list[np.ndarray] = []
+        self._labels:    list[np.ndarray] = []
+        self._true_lens: list[float]      = []
+        self._scores:    list[float]      = []
+
+        for shard_dir in shard_dirs:
+            shard_dir = Path(shard_dir)
+            meta_file = shard_dir / "meta.json"
+            if not meta_file.exists():
+                continue
+            with open(meta_file) as f:
+                meta = json.load(f)
+            n = meta["num_samples"]
+            tokens = np.load(shard_dir / "tokens.npz")
+            input_ids = tokens["input_ids"]   # (N, max_seq_len) int32
+            labels    = tokens["labels"]       # (N, max_seq_len) int32
+            lengths   = tokens["lengths"]      # (N,) int32
+            true_len  = tokens["true_len"]     # (N,) float32
+            scores    = tokens["scores"]       # (N,) float32
+            for i in range(n):
+                seq_len = int(lengths[i])
+                self._img_paths.append(shard_dir / "images" / f"{i:07d}.npy")
+                self._input_ids.append(input_ids[i, :seq_len])
+                self._labels.append(labels[i, :seq_len])
+                self._true_lens.append(float(true_len[i]))
+                self._scores.append(float(scores[i]))
+
+    def __len__(self) -> int:
+        return len(self._img_paths)
+
+    def __getitem__(self, idx: int) -> dict:
+        img_np    = np.load(self._img_paths[idx])   # (H, W, 3) uint8
+        img       = Image.fromarray(img_np)
+        if self.transform is not None:
+            pixel_values = self.transform(img)
+        else:
+            from torchvision.transforms.functional import to_tensor
+            pixel_values = to_tensor(img)
+
+        input_ids = self._input_ids[idx].astype(np.int64)
+        labels    = self._labels[idx].astype(np.int64)
+
+        return {
+            "pixel_values": pixel_values,
+            "input_ids":    torch.from_numpy(input_ids),
+            "labels":       torch.from_numpy(labels),
+            "true_len":     torch.tensor(self._true_lens[idx], dtype=torch.float),
         }
 
     def normal_indices(self) -> list[int]:
@@ -223,7 +311,10 @@ class _CollateFn:
 
 
 def build_dataloader(config, transform=None, split: str = "train") -> DataLoader:
-    dataset = Nav2TexDataset(config, transform=transform)
+    if getattr(config, "decoded", False):
+        dataset = Nav2TexDecodedDataset(config, transform=transform)
+    else:
+        dataset = Nav2TexDataset(config, transform=transform)
     pw = getattr(config, "persistent_workers", False) and config.num_workers > 0
     pf = getattr(config, "prefetch_factor", 2) if config.num_workers > 0 else None
 
@@ -242,7 +333,7 @@ def build_dataloader(config, transform=None, split: str = "train") -> DataLoader
             dataset,
             batch_sampler=sampler,
             num_workers=config.num_workers,
-            pin_memory=False,
+            pin_memory=True,
             collate_fn=_collate,
             persistent_workers=pw,
             prefetch_factor=pf,
@@ -253,7 +344,7 @@ def build_dataloader(config, transform=None, split: str = "train") -> DataLoader
         batch_size=config.batch_size,
         shuffle=(split == "train"),
         num_workers=config.num_workers,
-        pin_memory=False,
+        pin_memory=True,
         drop_last=True,
         collate_fn=_collate,
         persistent_workers=pw,

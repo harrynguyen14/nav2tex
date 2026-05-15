@@ -203,12 +203,12 @@ def _run_phase(
                 data_iter = iter(loader)
                 batch = next(data_iter)
 
-            pixel_values     = batch["pixel_values"].to(device)
-            encoder_key_mask = batch["encoder_key_mask"].to(device) if batch["encoder_key_mask"] is not None else None
-            input_ids        = batch["input_ids"].to(device)
-            labels           = batch["labels"].to(device)
-            attention_mask   = batch["attention_mask"].to(device)
-            true_len         = batch["true_len"].to(device)
+            pixel_values     = batch["pixel_values"].to(device, non_blocking=True)
+            encoder_key_mask = batch["encoder_key_mask"].to(device, non_blocking=True) if batch["encoder_key_mask"] is not None else None
+            input_ids        = batch["input_ids"].to(device, non_blocking=True)
+            labels           = batch["labels"].to(device, non_blocking=True)
+            attention_mask   = batch["attention_mask"].to(device, non_blocking=True)
+            true_len         = batch["true_len"].to(device, non_blocking=True)
             batch_tokens    += attention_mask.sum().item()
 
             is_last_accum = (i == config.grad_accum - 1)

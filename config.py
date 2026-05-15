@@ -21,10 +21,12 @@ def get_config():
     p.add_argument("--eos-token-id",   type=int,   default=2)
 
     # data
+    p.add_argument("--decoded",             action="store_true", default=False,
+                   help="use pre-decoded shards from predecode.py instead of raw parquet")
     p.add_argument("--data-glob",           default=_DATA_RAW)
     p.add_argument("--max-latex-chars",     type=int,   default=1024)
     p.add_argument("--max-seq-len",         type=int,   default=768)
-    p.add_argument("--max-patches",         type=int,   default=576)
+    p.add_argument("--max-patches",         type=int,   default=2304)
     p.add_argument("--patch-size",          type=int,   default=16)
     p.add_argument("--cpe-score-threshold", type=int,   default=400)
     p.add_argument("--cpe-ratio",           type=float, default=0.20)

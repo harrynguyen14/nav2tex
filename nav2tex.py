@@ -21,6 +21,7 @@ class Nav2Tex(nn.Module):
             encoder_output=encoder_output,
             labels=labels,
             true_len=true_len,
+            encoder_key_mask=encoder_key_mask,
         )
 
     def encode(self, images: torch.Tensor) -> torch.Tensor:
@@ -31,12 +32,14 @@ class Nav2Tex(nn.Module):
     def generate(self, images, tokenizer, max_new_tokens: int = 512, device="cpu", encoder_key_mask=None):
         images = images.to(device)
         encoder_output = self.encoder(images, max_patches=self.max_patches)
+        if encoder_key_mask is not None:
+            encoder_key_mask = encoder_key_mask.to(device)
 
         bos = tokenizer.bos_token_id
         input_ids = torch.tensor([[bos]], device=device)
 
         for _ in range(max_new_tokens):
-            logits = self.decoder(input_ids, encoder_output=encoder_output)
+            logits = self.decoder.generate_step(input_ids, encoder_output, encoder_key_mask)
             next_id = logits[:, -1, :].argmax(dim=-1, keepdim=True)
             input_ids = torch.cat([input_ids, next_id], dim=1)
             if (next_id == tokenizer.eos_token_id).all():
