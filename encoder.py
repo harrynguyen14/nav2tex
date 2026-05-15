@@ -64,25 +64,3 @@ def build_transform(model_name: str = MODEL_NAME, is_training: bool = False):
         transforms.Normalize(mean=mean, std=std),
     ]
     return transforms.Compose(ops)
-
-
-if __name__ == "__main__":
-    from PIL import Image
-    from urllib.request import urlopen
-
-    encoder = NaFlexViTEncoder(pretrained=True)
-    encoder.train(False)
-    transform = build_transform(is_training=False)
-
-    img = Image.open(urlopen(
-        "https://huggingface.co/datasets/huggingface/documentation-images"
-        "/resolve/main/beignets-task-guide.png"
-    )).convert("RGB")
-
-    x = transform(img).unsqueeze(0)
-
-    with torch.no_grad():
-        features = encoder(x)
-
-    print(f"Input : {tuple(x.shape)}")
-    print(f"Output: {tuple(features.shape)}")

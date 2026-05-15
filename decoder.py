@@ -48,7 +48,12 @@ class DecoderLM(nn.Module):
         super().__init__()
         self.config = config
 
-        ved = VisionEncoderDecoderModel.from_pretrained(self.PRETRAINED)
+        attn_impl = "flash_attention_2" if getattr(config, "flash_attn", False) else "sdpa"
+        ved = VisionEncoderDecoderModel.from_pretrained(
+            self.PRETRAINED,
+            attn_implementation=attn_impl,
+            torch_dtype=torch.bfloat16 if getattr(config, "bf16", True) else torch.float32,
+        )
         self.mbart = ved.decoder
 
         self.enc_proj = nn.Linear(self.ENCODER_DIM, self.DECODER_DIM, bias=False)
@@ -68,7 +73,8 @@ class DecoderLM(nn.Module):
     def forward(self, input_ids, attention_mask=None, encoder_output=None,
                 labels=None, true_len=None, encoder_key_mask=None):
         enc = self.enc_norm(self.enc_proj(encoder_output))
-        pred_len, _ = self.lam(enc)
+        pred_len, len_embed = self.lam(enc)
+        enc = enc + len_embed
 
         enc_attn_mask = self._enc_attn_mask(encoder_key_mask, enc.size(1), enc.device)
 
@@ -97,16 +103,19 @@ class DecoderLM(nn.Module):
         )
         return lm_loss + self.lam_lambda * len_loss, lm_loss, len_loss
 
-    def generate_step(self, input_ids, encoder_output, encoder_key_mask=None):
+    def generate_step(self, input_ids, encoder_output, encoder_key_mask=None, past_key_values=None):
         enc = self.enc_norm(self.enc_proj(encoder_output))
+        _, len_embed = self.lam(enc)
+        enc = enc + len_embed
         enc_attn_mask = self._enc_attn_mask(encoder_key_mask, enc.size(1), enc.device)
         out = self.mbart(
-            input_ids=input_ids,
+            input_ids=input_ids[:, -1:] if past_key_values is not None else input_ids,
             encoder_hidden_states=enc,
             encoder_attention_mask=enc_attn_mask,
-            use_cache=False,
+            past_key_values=past_key_values,
+            use_cache=True,
         )
-        return out.logits
+        return out.logits, out.past_key_values
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

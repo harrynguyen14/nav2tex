@@ -1,12 +1,9 @@
 import glob
 import io
-import json
 import random
 import re
-from pathlib import Path
 from typing import Iterator
 
-import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 import pyarrow.parquet as pq
@@ -31,7 +28,6 @@ def _patch_aware_resize(img: Image.Image, max_patches: int, patch_size: int = 16
     scale = (max_patches * patch_size * patch_size / (w * h)) ** 0.5
     new_w = max(patch_size, round(w * scale / patch_size) * patch_size)
     new_h = max(patch_size, round(h * scale / patch_size) * patch_size)
-    # clamp so neither dim exceeds what fits in max_patches
     while (new_w // patch_size) * (new_h // patch_size) > max_patches:
         if new_w >= new_h:
             new_w -= patch_size
@@ -122,91 +118,6 @@ class Nav2TexDataset(Dataset):
         }
 
 
-class Nav2TexDecodedDataset(Dataset):
-    """Fast dataset reading pre-decoded shards from predecode.py."""
-
-    def __init__(self, config, transform=None):
-        self.config    = config
-        self.transform = transform
-
-        globs = config.data_glob if isinstance(config.data_glob, list) else [config.data_glob]
-        shard_dirs = sorted(p for pattern in globs for p in glob.glob(pattern))
-        if not shard_dirs:
-            raise FileNotFoundError(f"No decoded shards found: {config.data_glob}")
-
-        self._img_paths: list[Path] = []
-        self._input_ids: list[np.ndarray] = []
-        self._labels:    list[np.ndarray] = []
-        self._true_lens: list[float]      = []
-        self._scores:    list[float]      = []
-
-        for shard_dir in shard_dirs:
-            shard_dir = Path(shard_dir)
-            meta_file = shard_dir / "meta.json"
-            if not meta_file.exists():
-                continue
-            with open(meta_file) as f:
-                meta = json.load(f)
-            n = meta["num_samples"]
-            tokens = np.load(shard_dir / "tokens.npz")
-            input_ids = tokens["input_ids"]   # (N, max_seq_len) int32
-            labels    = tokens["labels"]       # (N, max_seq_len) int32
-            lengths   = tokens["lengths"]      # (N,) int32
-            true_len  = tokens["true_len"]     # (N,) float32
-            scores    = tokens["scores"]       # (N,) float32
-            for i in range(n):
-                seq_len = int(lengths[i])
-                self._img_paths.append(shard_dir / "images" / f"{i:07d}.npy")
-                self._input_ids.append(input_ids[i, :seq_len])
-                self._labels.append(labels[i, :seq_len])
-                self._true_lens.append(float(true_len[i]))
-                self._scores.append(float(scores[i]))
-
-    def __len__(self) -> int:
-        return len(self._img_paths)
-
-    def __getitem__(self, idx: int) -> dict:
-        img_np    = np.load(self._img_paths[idx])   # (H, W, 3) uint8
-        img       = Image.fromarray(img_np)
-        if self.transform is not None:
-            pixel_values = self.transform(img)
-        else:
-            from torchvision.transforms.functional import to_tensor
-            pixel_values = to_tensor(img)
-
-        input_ids = self._input_ids[idx].astype(np.int64)
-        labels    = self._labels[idx].astype(np.int64)
-
-        return {
-            "pixel_values": pixel_values,
-            "input_ids":    torch.from_numpy(input_ids),
-            "labels":       torch.from_numpy(labels),
-            "true_len":     torch.tensor(self._true_lens[idx], dtype=torch.float),
-        }
-
-    def normal_indices(self) -> list[int]:
-        t = self.config.cpe_score_threshold
-        return [i for i, sc in enumerate(self._scores) if sc <= t]
-
-    def cpe_indices(self) -> list[int]:
-        t = self.config.cpe_score_threshold
-        return [i for i, sc in enumerate(self._scores) if sc > t]
-
-    def score_stats(self) -> dict:
-        import statistics
-        scores = self._scores
-        thresh = self.config.cpe_score_threshold
-        n_cpe  = sum(1 for sc in scores if sc > thresh)
-        return {
-            "total":   len(scores),
-            "n_cpe":   n_cpe,
-            "n_spe":   len(scores) - n_cpe,
-            "cpe_pct": round(n_cpe / len(scores) * 100, 2),
-            "median":  round(statistics.median(scores), 1),
-            "p95":     round(sorted(scores)[int(len(scores) * 0.95)], 1),
-        }
-
-
 class CPEInterleaveSampler(Sampler):
     def __init__(self, dataset: Nav2TexDataset, batch_size: int, cpe_ratio: float, seed: int = 42):
         self.normal_idx = dataset.normal_indices()
@@ -222,8 +133,11 @@ class CPEInterleaveSampler(Sampler):
     def __len__(self) -> int:
         return self.n_batches
 
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+
     def __iter__(self) -> Iterator[list[int]]:
-        rng = random.Random(self.seed)
+        rng = random.Random(self.seed + getattr(self, "_epoch", 0))
 
         normal_pool = self.normal_idx.copy()
         rng.shuffle(normal_pool)
@@ -249,30 +163,28 @@ class CPEInterleaveSampler(Sampler):
 def collate_fn(batch: list[dict], pad_token_id: int = 1, patch_size: int = 16) -> dict:
     max_text_len = max(item["input_ids"].size(0) for item in batch)
 
-    # image padding: find max H and W in batch, pad to multiple of patch_size
     imgs = [item["pixel_values"] for item in batch]
     if isinstance(imgs[0], torch.Tensor):
         def _ceil_patch(x): return ((x + patch_size - 1) // patch_size) * patch_size
-        max_h = _ceil_patch(max(t.shape[1] for t in imgs))
-        max_w = _ceil_patch(max(t.shape[2] for t in imgs))
-        padded_imgs = []
-        encoder_key_masks = []
-        for t in imgs:
-            _, h, w = t.shape
-            pad_h = max_h - h
-            pad_w = max_w - w
-            padded = torch.nn.functional.pad(t, (0, pad_w, 0, pad_h), value=0.0)
-            padded_imgs.append(padded)
-            # True = valid patch, False = padding patch
-            patch_h = max_h // patch_size
-            patch_w = max_w // patch_size
-            valid_ph = h // patch_size
-            valid_pw = w // patch_size
-            mask = torch.zeros(patch_h, patch_w, dtype=torch.bool)
-            mask[:valid_ph, :valid_pw] = True
-            encoder_key_masks.append(mask.flatten())
-        pixel_values      = torch.stack(padded_imgs)
-        encoder_key_masks = torch.stack(encoder_key_masks)
+        heights = torch.tensor([t.shape[1] for t in imgs])
+        widths  = torch.tensor([t.shape[2] for t in imgs])
+        max_h   = _ceil_patch(heights.max().item())
+        max_w   = _ceil_patch(widths.max().item())
+
+        padded_imgs = torch.stack([
+            torch.nn.functional.pad(t, (0, max_w - t.shape[2], 0, max_h - t.shape[1]))
+            for t in imgs
+        ])
+
+        patch_h  = max_h // patch_size
+        patch_w  = max_w // patch_size
+        valid_ph = heights // patch_size
+        valid_pw = widths   // patch_size
+        row_mask = torch.arange(patch_h).unsqueeze(0) < valid_ph.unsqueeze(1)  # (B, patch_h)
+        col_mask = torch.arange(patch_w).unsqueeze(0) < valid_pw.unsqueeze(1)  # (B, patch_w)
+        encoder_key_masks = (row_mask.unsqueeze(2) & col_mask.unsqueeze(1)).reshape(len(imgs), -1)
+
+        pixel_values = padded_imgs
     else:
         pixel_values      = None
         encoder_key_masks = None
@@ -311,10 +223,7 @@ class _CollateFn:
 
 
 def build_dataloader(config, transform=None, split: str = "train") -> DataLoader:
-    if getattr(config, "decoded", False):
-        dataset = Nav2TexDecodedDataset(config, transform=transform)
-    else:
-        dataset = Nav2TexDataset(config, transform=transform)
+    dataset = Nav2TexDataset(config, transform=transform)
     pw = getattr(config, "persistent_workers", False) and config.num_workers > 0
     pf = getattr(config, "prefetch_factor", 2) if config.num_workers > 0 else None
 

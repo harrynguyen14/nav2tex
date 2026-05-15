@@ -179,6 +179,7 @@ def _run_phase(
 ):
     model.train()
     step             = start_step
+    epoch            = 0
     data_iter        = iter(loader)
     running_loss     = 0.0
     running_lm_loss  = 0.0
@@ -200,6 +201,9 @@ def _run_phase(
             try:
                 batch = next(data_iter)
             except StopIteration:
+                epoch += 1
+                if hasattr(loader.batch_sampler, "set_epoch"):
+                    loader.batch_sampler.set_epoch(epoch)
                 data_iter = iter(loader)
                 batch = next(data_iter)
 
@@ -295,6 +299,7 @@ def _run_evaluation(model: Nav2Tex, loader, tokenizer, config, device, phase: in
             max_new_tokens=config.max_seq_len,
             device=device,
             encoder_key_mask=encoder_key_mask,
+            num_beams=getattr(config, "num_beams", 1),
         )
 
         for pred, ref in zip(pred_ids, ref_ids):
