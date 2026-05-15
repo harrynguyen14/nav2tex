@@ -30,7 +30,7 @@ class LengthAwareModule(nn.Module):
         out = self.out_proj(out.transpose(1, 2).reshape(B, S, C))
         x = self.norm(out + encoder_out).mean(dim=1)
         pred_len = self.mlp(x)
-        return pred_len.squeeze(-1), self.len_proj(pred_len)
+        return pred_len.squeeze(-1), self.len_proj(pred_len).unsqueeze(1)
 
 
 class _LamConfig:
@@ -48,11 +48,11 @@ class DecoderLM(nn.Module):
         super().__init__()
         self.config = config
 
-        attn_impl = "flash_attention_2" if getattr(config, "flash_attn", False) else "sdpa"
+        attn_impl = "flash_attention_2" if getattr(config, "flash_attn", False) else "eager"
         ved = VisionEncoderDecoderModel.from_pretrained(
             self.PRETRAINED,
             attn_implementation=attn_impl,
-            torch_dtype=torch.bfloat16 if getattr(config, "bf16", True) else torch.float32,
+            dtype=torch.bfloat16 if getattr(config, "bf16", True) else torch.float32,
         )
         self.mbart = ved.decoder
 
@@ -62,13 +62,17 @@ class DecoderLM(nn.Module):
         self.lam = LengthAwareModule(_LamConfig(d_model=self.DECODER_DIM, n_heads=16))
 
         self.label_smoothing = getattr(config, "label_smoothing", 0.1)
-        self.lam_lambda      = getattr(config, "lam_lambda", 0.01)
+        self.lam_lambda      = getattr(config, "lam_lambda", 1.0)
         self.vocab_size      = self.mbart.config.vocab_size
 
     def _enc_attn_mask(self, encoder_key_mask, S, device):
         if encoder_key_mask is None:
             return None
-        return encoder_key_mask[:, :S].to(dtype=torch.long, device=device)
+        mask = encoder_key_mask.to(dtype=torch.long, device=device)
+        if mask.size(1) < S:
+            pad = torch.zeros(mask.size(0), S - mask.size(1), dtype=torch.long, device=device)
+            mask = torch.cat([mask, pad], dim=1)
+        return mask[:, :S]
 
     def forward(self, input_ids, attention_mask=None, encoder_output=None,
                 labels=None, true_len=None, encoder_key_mask=None):

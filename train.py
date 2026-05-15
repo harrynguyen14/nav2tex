@@ -135,6 +135,16 @@ def _save_checkpoint(model, optimizer, scheduler, config, phase: int, step: int,
         shutil.rmtree(old)
 
 
+def _save_final_model(model, config, save_dir: Path, phase: int):
+    final_dir = save_dir / f"final_phase{phase}"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+    save_file({k: v.cpu() for k, v in raw_model.state_dict().items()}, final_dir / "model.safetensors")
+    with open(final_dir / "config.json", "w") as f:
+        json.dump(vars(config), f, indent=2)
+    print(f"  final phase{phase} model saved → {final_dir}")
+
+
 def _load_model_weights(model, ckpt_dir: Path):
     sd = load_file(ckpt_dir / "model.safetensors", device="cpu")
     sd = {(k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v for k, v in sd.items()}
@@ -377,10 +387,13 @@ def train():
     start_step1 = 0
     resume_ckpt = Path(config.resume) if config.resume else _find_latest_checkpoint(save_dir, phase=1)
     if resume_ckpt and resume_ckpt.exists():
-        print(f"resuming phase1 from {resume_ckpt}")
-        _load_model_weights(model, resume_ckpt)
-        start_step1 = _load_trainer_state(opt1, sch1, resume_ckpt, device)
-        print(f"resumed at step {start_step1}")
+        if "phase2" in resume_ckpt.name:
+            print(f"WARNING: --resume points to a phase2 checkpoint ({resume_ckpt.name}); skipping phase1 resume")
+        else:
+            print(f"resuming phase1 from {resume_ckpt}")
+            _load_model_weights(model, resume_ckpt)
+            start_step1 = _load_trainer_state(opt1, sch1, resume_ckpt, device)
+            print(f"resumed at step {start_step1}")
 
     if config.compile:
         model = torch.compile(model)
@@ -391,6 +404,8 @@ def train():
 
     if val_loader is not None:
         _run_evaluation(model, val_loader, tokenizer, config, device, phase=1)
+
+    _save_final_model(model, config, save_dir, phase=1)
 
     # ── Phase 2: full model ──────────────────────────────────────────────────
     print("\n=== Phase 2: full model (differential LR) ===")
@@ -429,6 +444,7 @@ def train():
     if val_loader is not None:
         _run_evaluation(model, val_loader, tokenizer, config, device, phase=2)
 
+    _save_final_model(model, config, save_dir, phase=2)
     print("training complete")
 
 

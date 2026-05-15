@@ -32,7 +32,7 @@ def get_config():
     p.add_argument("--encoder-model", default="naflexvit_base_patch16_gap.e300_s576_in1k")
 
     # LAM
-    p.add_argument("--lam-lambda", type=float, default=0.1)
+    p.add_argument("--lam-lambda", type=float, default=1.0)
 
     # training - phase 1 (frozen encoder; decoder pretrained, aligns enc_proj fast)
     p.add_argument("--phase1-epochs", type=int,   default=2)
