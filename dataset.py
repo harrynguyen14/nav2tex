@@ -47,20 +47,30 @@ class Nav2TexDataset(Dataset):
         self.max_patches     = getattr(config, "max_patches", 576)
         self.patch_size      = getattr(config, "patch_size", 16)
 
-        globs = config.data_glob if isinstance(config.data_glob, list) else [config.data_glob]
-        files = sorted(f for pattern in globs for f in glob.glob(pattern))
-        if not files:
-            raise FileNotFoundError(f"No parquet files found: {config.data_glob}")
+        globs  = config.data_glob if isinstance(config.data_glob, list) else [config.data_glob]
+        ratios = getattr(config, "data_glob_ratios", None) or [1.0] * len(globs)
+        if len(ratios) != len(globs):
+            raise ValueError(f"data_glob_ratios length {len(ratios)} != data_glob length {len(globs)}")
 
         rows = []
-        for f in files:
-            table = pq.read_table(f, columns=["image", "latex"])
-            for img_bytes, latex in zip(table["image"].to_pylist(), table["latex"].to_pylist()):
-                if not latex or not isinstance(latex, str) or not latex.strip():
-                    continue
-                if len(latex) > self.max_latex_chars:
-                    continue
-                rows.append((img_bytes, latex))
+        for pattern, ratio in zip(globs, ratios):
+            files = sorted(glob.glob(pattern))
+            if not files:
+                raise FileNotFoundError(f"No parquet files found: {pattern}")
+            rng = random.Random(42)
+            for f in files:
+                table = pq.read_table(f, columns=["image", "latex"])
+                img_list   = table["image"].to_pylist()
+                latex_list = table["latex"].to_pylist()
+                pairs = [
+                    (img, lat) for img, lat in zip(img_list, latex_list)
+                    if lat and isinstance(lat, str) and lat.strip()
+                    and len(lat) <= self.max_latex_chars
+                ]
+                if ratio < 1.0:
+                    rng.shuffle(pairs)
+                    pairs = pairs[:max(1, int(len(pairs) * ratio))]
+                rows.extend(pairs)
 
         self.samples = rows
         self._scores = [_complexity_score(latex) for _, latex in rows]

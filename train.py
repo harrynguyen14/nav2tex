@@ -409,7 +409,11 @@ def train():
 
     # ── Phase 2: full model ──────────────────────────────────────────────────
     print("\n=== Phase 2: full model (differential LR) ===")
-    p2_dict   = {**vars(config), "data_glob": config.phase2_data_glob}
+    p2_dict   = {
+        **vars(config),
+        "data_glob":        config.phase2_data_glob,
+        "data_glob_ratios": getattr(config, "phase2_data_glob_ratios", None),
+    }
     p2_config = argparse.Namespace(**p2_dict)
     loader2   = build_dataloader(p2_config, transform=transform, split="train")
 

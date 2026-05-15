@@ -21,6 +21,8 @@ def get_config():
 
     # data
     p.add_argument("--data-glob",           default=_DATA_RAW)
+    p.add_argument("--data-glob-ratios",    nargs="+", type=float, default=None,
+                   help="per-glob sample ratio (e.g. 0.25 0.30); must match --data-glob count if set")
     p.add_argument("--max-latex-chars",     type=int,   default=1024)
     p.add_argument("--max-seq-len",         type=int,   default=768)
     p.add_argument("--max-patches",         type=int,   default=576)
@@ -42,7 +44,9 @@ def get_config():
     p.add_argument("--phase2-epochs",    type=int,   default=8)
     p.add_argument("--phase2-lr",        type=float, default=5e-5)
     p.add_argument("--phase2-enc-lr",    type=float, default=5e-6)
-    p.add_argument("--phase2-data-glob", nargs="+",  default=[_DATA_LIGHT, _DATA_HEAVY])
+    p.add_argument("--phase2-data-glob",        nargs="+", default=[_DATA_RAW, _DATA_LIGHT, _DATA_HEAVY])
+    p.add_argument("--phase2-data-glob-ratios", nargs="+", type=float, default=[0.20, 0.40, 1.0],
+                   help="per-glob sample ratio for phase2 (raw 20%%, light 40%%, heavy 100%%)")
     p.add_argument("--val-data-glob",    default=None)
     p.add_argument("--val-batch-size",   type=int, default=8)
     p.add_argument("--val-samples",      type=int, default=500)
