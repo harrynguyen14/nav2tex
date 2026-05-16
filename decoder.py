@@ -152,19 +152,20 @@ class DecoderLM(nn.Module):
         )
         return lm_loss + self.lam_lambda * len_loss, lm_loss, len_loss
 
-    def generate_step(self, input_ids, encoder_output, encoder_key_mask=None, past_key_values=None):
+    def prepare_encoder_output(self, encoder_output: torch.Tensor) -> torch.Tensor:
         enc = self.enc_norm(self.enc_proj(encoder_output))
         _, len_embed = self.lam(enc)
         enc = enc + len_embed
-        target_dtype = next(self.mbart.parameters()).dtype
-        enc = enc.to(dtype=target_dtype)
+        return enc.to(dtype=next(self.mbart.parameters()).dtype)
+
+    def decode_step(self, input_ids: torch.Tensor, enc: torch.Tensor) -> torch.Tensor:
         out = self.mbart(
             input_ids=input_ids,
             encoder_hidden_states=enc,
             encoder_attention_mask=None,
             use_cache=False,
         )
-        return out.logits, None
+        return out.logits
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
