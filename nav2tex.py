@@ -42,9 +42,21 @@ class Nav2Tex(nn.Module):
         if encoder_key_mask is not None:
             encoder_key_mask = encoder_key_mask.to(device)
 
-        if num_beams <= 1:
-            return self._greedy(encoder_output, encoder_key_mask, tokenizer, max_new_tokens, device)
-        return self._beam_search(encoder_output, encoder_key_mask, tokenizer, max_new_tokens, device, num_beams)
+        # gradient checkpointing is incompatible with use_cache=True
+        decoder_module = self.decoder.mbart.model.decoder
+        ckpt_was_enabled = getattr(decoder_module, "gradient_checkpointing", False)
+        if ckpt_was_enabled:
+            decoder_module.gradient_checkpointing_disable()
+
+        try:
+            if num_beams <= 1:
+                return self._greedy(encoder_output, encoder_key_mask, tokenizer, max_new_tokens, device)
+            return self._beam_search(encoder_output, encoder_key_mask, tokenizer, max_new_tokens, device, num_beams)
+        finally:
+            if ckpt_was_enabled:
+                decoder_module.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
 
     def _greedy(self, encoder_output, encoder_key_mask, tokenizer, max_new_tokens, device):
         input_ids = torch.tensor([[tokenizer.bos_token_id]], device=device)
