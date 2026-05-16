@@ -60,11 +60,10 @@ class Nav2Tex(nn.Module):
 
     def _greedy(self, encoder_output, encoder_key_mask, tokenizer, max_new_tokens, device):
         input_ids = torch.tensor([[tokenizer.bos_token_id]], device=device)
-        past_key_values = None
 
         for _ in range(max_new_tokens):
-            logits, past_key_values = self.decoder.generate_step(
-                input_ids, encoder_output, encoder_key_mask, past_key_values=past_key_values
+            logits, _ = self.decoder.generate_step(
+                input_ids, encoder_output, encoder_key_mask
             )
             next_id = logits[:, -1, :].argmax(dim=-1, keepdim=True)
             input_ids = torch.cat([input_ids, next_id], dim=1)

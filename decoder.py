@@ -156,17 +156,15 @@ class DecoderLM(nn.Module):
         enc = self.enc_norm(self.enc_proj(encoder_output))
         _, len_embed = self.lam(enc)
         enc = enc + len_embed
-        # flash_attn 2 cross-attention requires encoder_hidden_states in the model's dtype
         target_dtype = next(self.mbart.parameters()).dtype
         enc = enc.to(dtype=target_dtype)
         out = self.mbart(
-            input_ids=input_ids[:, -1:] if past_key_values is not None else input_ids,
+            input_ids=input_ids,
             encoder_hidden_states=enc,
             encoder_attention_mask=None,
-            past_key_values=past_key_values,
-            use_cache=True,
+            use_cache=False,
         )
-        return out.logits, out.past_key_values
+        return out.logits, None
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
