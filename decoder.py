@@ -157,6 +157,8 @@ class DecoderLM(nn.Module):
         _, len_embed = self.lam(enc)
         enc = enc + len_embed
         enc_attn_mask = self._enc_attn_mask(encoder_key_mask, enc.size(1), enc.device)
+        if enc_attn_mask is not None:
+            enc_attn_mask = enc_attn_mask.bool()
         out = self.mbart(
             input_ids=input_ids[:, -1:] if past_key_values is not None else input_ids,
             encoder_hidden_states=enc,
