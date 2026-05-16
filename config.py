@@ -92,6 +92,8 @@ def get_config():
                    help="enable gradient checkpointing on encoder and decoder to reduce VRAM")
     p.add_argument("--optim-8bit",         action="store_true", default=False,
                    help="use bitsandbytes 8-bit AdamW to reduce optimizer VRAM (~4GB savings)")
+    p.add_argument("--fp8",                action="store_true", default=False,
+                   help="enable torchao FP8 training on mbart decoder (requires torchao, RTX 4090/5090)")
     p.add_argument("--num-beams",          type=int,            default=1,
                    help="beam width for validation decoding (1 = greedy)")
 

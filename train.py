@@ -482,7 +482,8 @@ def train():
                 print(f"resumed at step {start_step1}")
 
         if config.compile:
-            model = torch.compile(model)
+            torch._dynamo.config.allow_unspec_int_on_nn_module = True
+            model.decoder.mbart = torch.compile(model.decoder.mbart, dynamic=True)
 
         _run_phase(model, loader1, opt1, sch1, config, phase=1,
                    total_steps=total_steps1, start_step=start_step1,
@@ -491,6 +492,11 @@ def train():
 
         _save_final_model(model, config, save_dir, phase=1)
         del loader1, opt1, sch1
+
+    if getattr(config, "fp8", False):
+        from torchao.float8 import convert_to_float8_training
+        convert_to_float8_training(model.decoder.mbart)
+        print("FP8 training enabled on mbart decoder")
 
     # ── Phase 2: full model ──────────────────────────────────────────────────
     print("\n=== Phase 2: full model (differential LR) ===")
