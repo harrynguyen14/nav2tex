@@ -72,7 +72,7 @@ def edit_distance(hypotheses: list[str], references: list[str]) -> float:
         h_tok = _tokenize(h)
         r_tok = _tokenize(r)
         d = _levenshtein(h_tok, r_tok)
-        scores.append(d / max(len(r_tok), 1))
+        scores.append(d / max(len(h_tok), len(r_tok), 1))
     return sum(scores) / max(len(scores), 1)
 
 
