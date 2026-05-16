@@ -370,7 +370,9 @@ def _run_evaluation(model: Nav2Tex, loader, tokenizer, config, device, phase: in
     max_samples = getattr(config, "bleu_samples", 512)
     _amp = amp_ctx if amp_ctx is not None else contextlib.nullcontext()
 
-    for batch in tqdm(loader, desc=f"bleu p{phase}", dynamic_ncols=True, leave=False):
+    batch_size = getattr(config, "val_batch_size", getattr(config, "batch_size", 8))
+    max_batches = math.ceil(max_samples / batch_size)
+    for batch in tqdm(loader, desc=f"bleu p{phase}", dynamic_ncols=True, leave=False, total=max_batches):
         if len(hypotheses) >= max_samples:
             break
         pixel_values     = batch["pixel_values"].to(device)
