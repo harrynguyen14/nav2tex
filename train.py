@@ -530,7 +530,7 @@ def train():
     sch2  = _make_scheduler(opt2, warmup2, total_steps2)
 
     start_step2  = 0
-    resume_ckpt2 = _find_latest_checkpoint(save_dir, phase=2)
+    resume_ckpt2 = (Path(config.resume) if config.resume else None) or _find_latest_checkpoint(save_dir, phase=2)
     if resume_ckpt2 and resume_ckpt2.exists():
         print(f"resuming phase2 from {resume_ckpt2}")
         _load_model_weights(model, resume_ckpt2)
